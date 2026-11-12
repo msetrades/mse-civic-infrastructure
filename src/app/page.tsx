@@ -3,9 +3,7 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase/client";
-
-type Asset = { id: string; type: string; condition: number; age: number; criticality: number; failures: number; cost: number };
-type RankedAsset = Asset & { risk: number; priority: number; selected: boolean };
+import { rankAssets, type Asset, type RankedAsset } from "@/lib/capital";
 
 function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
@@ -46,24 +44,6 @@ function scoreAssets(text: string, budget: number): RankedAsset[] {
   });
   if (new Set(parsed.map((a) => a.id)).size !== parsed.length) throw new Error("Asset IDs must be unique within the CSV.");
   return rankAssets(parsed, budget);
-}
-
-function rankAssets(parsed: Asset[], budget: number): RankedAsset[] {
-  const maxAge = Math.max(1, ...parsed.map((a) => a.age));
-  const maxFailures = Math.max(1, ...parsed.map((a) => a.failures));
-  const ranked = parsed.map((a) => {
-    const conditionRisk = (a.condition - 1) / 4;
-    const ageRisk = Math.min(a.age / maxAge, 1);
-    const historyRisk = Math.min(a.failures / maxFailures, 1);
-    const risk = 100 * (0.4 * conditionRisk + 0.25 * ageRisk + 0.35 * historyRisk);
-    return { ...a, risk, priority: risk * a.criticality, selected: false };
-  }).sort((a, b) => b.priority / b.cost - a.priority / a.cost);
-  let remaining = budget;
-  return ranked.map((a) => {
-    const selected = a.cost <= remaining;
-    if (selected) remaining -= a.cost;
-    return { ...a, selected };
-  });
 }
 
 export default function Home() {
