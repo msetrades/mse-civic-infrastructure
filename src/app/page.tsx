@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase/client";
 
@@ -21,6 +21,7 @@ function parseCsv(text: string): string[][] {
     } else cell += char;
   }
   row.push(cell.trim()); if (row.some(Boolean)) rows.push(row);
+  if (rows.length > 50001) throw new Error("This workspace accepts up to 50,000 assets per import.");
   return rows;
 }
 
@@ -38,7 +39,7 @@ function scoreAssets(text: string, budget: number): RankedAsset[] {
       id: r[col("asset_id")], type: r[col("type")], condition: number("condition_1_5"), age: number("age_years"),
       criticality: number("criticality_1_5"), failures: number("failures_24m"), cost: number("repair_cost"),
     };
-    if (!asset.id || !asset.type || ![asset.condition, asset.age, asset.criticality, asset.failures, asset.cost].every(Number.isFinite) || asset.condition < 1 || asset.condition > 5 || asset.criticality < 1 || asset.criticality > 5 || asset.age < 0 || asset.failures < 0 || asset.cost <= 0) {
+    if (!asset.id || !asset.type || ![asset.condition, asset.age, asset.criticality, asset.failures, asset.cost].every(Number.isFinite) || !Number.isInteger(asset.condition) || !Number.isInteger(asset.criticality) || !Number.isInteger(asset.failures) || asset.condition < 1 || asset.condition > 5 || asset.criticality < 1 || asset.criticality > 5 || asset.age < 0 || asset.failures < 0 || asset.cost <= 0) {
       throw new Error(`Invalid values on data row ${index + 2}. Check condition and criticality (1-5), non-negative age/failures, and positive repair_cost.`);
     }
     return asset;
@@ -80,6 +81,7 @@ export default function Home() {
   const [assetDatabaseIds, setAssetDatabaseIds] = useState<Map<string, string>>(new Map());
   const [assets, setAssets] = useState<RankedAsset[]>([]);
   const [budget, setBudget] = useState(250000);
+  const budgetRef = useRef(250000);
   const [error, setError] = useState("");
   const [fileName, setFileName] = useState("");
   const selected = useMemo(() => assets.filter((a) => a.selected), [assets]);
@@ -133,12 +135,12 @@ export default function Home() {
             failures: row.failures_24m,
             cost: Number(row.estimated_repair_cost),
           }));
-          setAssets(rankAssets(loaded, budget));
+          setAssets(rankAssets(loaded, budgetRef.current));
         }
         setWorkspaceReady(true);
       });
     return () => { cancelled = true; };
-  }, [organizationId, budget]);
+  }, [organizationId]);
 
   const submitAuth = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -214,15 +216,17 @@ export default function Home() {
     catch (e) { setAssets([]); setError(e instanceof Error ? e.message : "Unable to process this file."); }
     finally { setBusy(false); }
   };
-  const rerun = async () => {
-    if (!fileName) return;
-    const input = document.querySelector<HTMLInputElement>("#asset-file");
-    if (!input?.files?.[0]) return;
-    try { setAssets(scoreAssets(await input.files[0].text(), budget)); setError(""); }
-    catch (e) { setError(e instanceof Error ? e.message : "Unable to process this file."); }
+  const rerun = () => {
+    if (!assets.length) return;
+    const current = assets.map(({ id, type, condition, age, criticality, failures, cost }) => ({ id, type, condition, age, criticality, failures, cost }));
+    setAssets(rankAssets(current, budget));
   };
   const exportPlan = () => {
-    const csv = ["asset_id,type,condition,age_years,criticality,failures_24m,repair_cost,risk_score,priority_score,selected", ...assets.map((a) => [a.id,a.type,a.condition,a.age,a.criticality,a.failures,a.cost,a.risk.toFixed(1),a.priority.toFixed(1),a.selected].join(","))].join("\n");
+    const cell = (value: string | number | boolean) => {
+      const text = String(value);
+      return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+    };
+    const csv = ["asset_id,type,condition,age_years,criticality,failures_24m,repair_cost,risk_score,priority_score,selected", ...assets.map((a) => [a.id,a.type,a.condition,a.age,a.criticality,a.failures,a.cost,a.risk.toFixed(1),a.priority.toFixed(1),a.selected].map(cell).join(","))].join("\n");
     const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); link.download = "civic-repair-priorities.csv"; link.click(); URL.revokeObjectURL(link.href);
   };
 
@@ -239,7 +243,7 @@ export default function Home() {
       <div className="hero"><div><p className="eyebrow">CAPITAL PLANNING / 01</p><h1>Repair the assets<br/>that matter most.</h1><p className="lead">Turn condition, failure history, criticality, and repair cost into a transparent, budget-aware intervention plan.</p></div><div className="hero-index">01 <span>/ 10</span></div></div>
       <section className="panel import-panel" id="asset-register"><div><p className="eyebrow">01 — LOAD YOUR REGISTER</p><h2>Start with your asset data</h2><p className="muted">CSV columns: <code>asset_id, type, condition_1_5, age_years, criticality_1_5, failures_24m, repair_cost</code></p></div><label className="upload">{busy ? "Saving…" : fileName ? `Replace ${fileName}` : "Choose asset CSV"}<input id="asset-file" type="file" accept=".csv,text/csv" disabled={busy} onChange={handleFile}/></label></section>
       {error && <p className="error" role="alert">{error}</p>}
-      <section className="control-row" id="capital-plan"><div><p className="eyebrow">02 — SET CAPITAL CONSTRAINT</p><label htmlFor="budget">Available repair budget</label></div><div className="budget"><span>$</span><input id="budget" type="number" min="0" value={budget} onChange={(e) => setBudget(Number(e.target.value))} onBlur={rerun}/><button onClick={rerun}>Recalculate plan <b>↗</b></button></div></section>
+            <section className="control-row" id="capital-plan"><div><p className="eyebrow">02 — SET CAPITAL CONSTRAINT</p><label htmlFor="budget">Available repair budget</label></div><div className="budget"><span>$</span><input id="budget" type="number" min="0" value={budget} onChange={(e) => { const value = Number(e.target.value); budgetRef.current = value; setBudget(value); }} onBlur={rerun}/><button onClick={rerun}>Recalculate plan <b>↗</b></button></div></section>
       <section className="metrics"><article><span>ASSETS ASSESSED</span><strong>{assets.length || "—"}</strong><small>Validated register rows</small></article><article><span>RECOMMENDED REPAIRS</span><strong>{assets.length ? selected.length : "—"}</strong><small>Selected within budget</small></article><article><span>CAPITAL ALLOCATED</span><strong>{assets.length ? `$${totalCost.toLocaleString()}` : "—"}</strong><small>{assets.length ? `${((totalCost / Math.max(1, budget)) * 100).toFixed(0)}% of available budget` : "Awaiting asset data"}</small></article></section>
       <section className="panel table-panel" id="risk-queue"><div className="table-head"><div><p className="eyebrow">03 — DECISION QUEUE</p><h2>Intervention priorities</h2></div><div className="actions"><button className="secondary" onClick={savePlan} disabled={!assets.length || busy || assets.some((asset) => !assetDatabaseIds.has(asset.id))}>{busy ? "Saving…" : "Save budget plan"}</button><button className="secondary" onClick={exportPlan} disabled={!assets.length}>Export plan <b>↓</b></button></div></div>{assets.length ? <div className="table-wrap"><table><thead><tr><th>ASSET</th><th>TYPE</th><th>RISK</th><th>CRITICALITY</th><th>REPAIR COST</th><th>PLAN</th></tr></thead><tbody>{assets.map((a) => <tr key={a.id}><td><strong>{a.id}</strong><small>{a.failures} failures / 24 mo</small></td><td>{a.type}</td><td><span className={`risk ${a.risk > 65 ? "high" : a.risk > 35 ? "mid" : "low"}`}>{a.risk.toFixed(0)} / 100</span></td><td>{a.criticality} / 5</td><td>${a.cost.toLocaleString()}</td><td>{a.selected ? <span className="included">IN PLAN</span> : <span className="deferred">DEFERRED</span>}</td></tr>)}</tbody></table></div> : <div className="empty"><span>CSV</span><p>Your ranked repair queue will appear here once an asset register is loaded.</p><small>No example records are inserted; analysis only runs on data you provide.</small></div>}</section>
       <section className="method-note" id="method"><p className="eyebrow">SCORING / RISK SCREENING V1</p><p>Condition risk (40%), cohort-normalized age (25%), and cohort-normalized 24-month failures (35%) form a 0–100 exposure score. Criticality scales consequence. The budget queue is a greedy priority-per-cost heuristic, not a calibrated failure probability or globally optimal portfolio.</p></section>
